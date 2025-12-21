@@ -31,7 +31,7 @@ func New() *AlsoNow {
 func (an *AlsoNow) Run() {
 	fmt.Println("🌠 Also now.")
 	host := "0.0.0.0"
-	port := "1213"
+	port := "1221"
 
 	if addr := os.Getenv("ALSONOW_ADDR"); addr != "" {
 		fields := strings.SplitN(addr, ":", 2)
