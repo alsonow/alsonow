@@ -23,18 +23,27 @@ type AlsoNow struct {
 }
 
 func New() *AlsoNow {
-	router := &routerImpl{
-		routes: make(map[string]map[string][]HandlerFunc),
-	}
-
-	an := &AlsoNow{
+	router := newRouter()
+	return &AlsoNow{
 		Router: router,
 		stop:   make(chan struct{}),
 		serverConfig: &http.Server{
 			ReadHeaderTimeout: 5 * time.Second,
 		},
 	}
-	return an
+}
+
+func NewWithLogger() *AlsoNow {
+	router := newRouter()
+	// logger
+	router.Use(Logger())
+	return &AlsoNow{
+		Router: router,
+		stop:   make(chan struct{}),
+		serverConfig: &http.Server{
+			ReadHeaderTimeout: 5 * time.Second,
+		},
+	}
 }
 
 func (an *AlsoNow) WithServerConfig(cfg *http.Server) *AlsoNow {

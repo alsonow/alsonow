@@ -5,9 +5,12 @@
 package alsonow
 
 import (
+	"encoding/json"
 	"fmt"
 	"net/http"
 )
+
+type HandlerFunc func(*Context)
 
 type Context struct {
 	Writer   http.ResponseWriter
@@ -27,7 +30,15 @@ func (c *Context) Next() {
 }
 
 func (c *Context) String(status int, format string, args ...any) {
-	c.Writer.Header().Set("Content-Type", "text/plain")
+	c.Writer.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	c.Writer.WriteHeader(status)
 	fmt.Fprintf(c.Writer, format, args...)
+}
+
+func (c *Context) JSON(status int, v any) {
+	c.Writer.Header().Set("Content-Type", "application/json; charset=utf-8")
+	c.Writer.WriteHeader(status)
+	if err := json.NewEncoder(c.Writer).Encode(v); err != nil {
+		http.Error(c.Writer, err.Error(), http.StatusInternalServerError)
+	}
 }
