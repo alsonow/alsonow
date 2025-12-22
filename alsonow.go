@@ -8,22 +8,38 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
-	"strings"
 	"syscall"
 	"time"
 )
 
 type AlsoNow struct {
 	Router
-	stop chan struct{}
+	stop         chan struct{}
+	serverConfig *http.Server
 }
 
 func New() *AlsoNow {
+	router := &routerImpl{
+		routes: make(map[string]map[string][]HandlerFunc),
+	}
+
 	an := &AlsoNow{
-		stop: make(chan struct{}),
+		Router: router,
+		stop:   make(chan struct{}),
+		serverConfig: &http.Server{
+			ReadHeaderTimeout: 5 * time.Second,
+		},
+	}
+	return an
+}
+
+func (an *AlsoNow) WithServerConfig(cfg *http.Server) *AlsoNow {
+	if cfg != nil {
+		an.serverConfig = cfg
 	}
 	return an
 }
@@ -34,43 +50,51 @@ func (an *AlsoNow) Run() {
 	port := "1221"
 
 	if addr := os.Getenv("ALSONOW_ADDR"); addr != "" {
-		fields := strings.SplitN(addr, ":", 2)
-		host = fields[0]
-		port = fields[1]
+		h, p, err := net.SplitHostPort(addr)
+		if err != nil {
+			log.Printf("Invalid ALSONOW_ADDR %q, using default: %v", addr, err)
+		} else {
+			host, port = h, p
+		}
 	}
 
-	addr := host + ":" + port
-	fmt.Println("Serving on http://localhost:" + port)
+	addr := fmt.Sprintf("%s:%s", host, port)
+	fmt.Printf("Listening on http://%s:%s\n", host, port)
 
-	server := &http.Server{
-		Addr:              addr,
-		Handler:           an,
-		ReadHeaderTimeout: 5 * time.Second,
-	}
+	server := an.serverConfig
+	server.Handler = an
+	server.Addr = addr
 
+	listenErr := make(chan error, 1)
 	go func() {
 		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			log.Fatalf("Faild to start server, err:%v ", err)
+			listenErr <- err
 		}
 	}()
 
-	<-an.stop
-
-	// Block and wait for a signal, then shut down the server after receiving it.
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
-	<-quit // Block until a termination signal(SIGINT or SIGTERM) is received.
 
-	if err := server.Shutdown(context.Background()); err != nil {
-		log.Fatalf("Faild to shutdown server, err:%v ", err)
+	select {
+	case <-an.stop:
+		log.Println("Received Stop() signal")
+	case <-quit:
+		log.Println("Received system interrupt (SIGINT/SIGTERM)")
+	case err := <-listenErr:
+		log.Fatalf("Server listen error: %v", err)
+	}
+
+	log.Println("Shutting down server...")
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	if err := server.Shutdown(ctx); err != nil {
+		log.Printf("Server forced shutdown: %v", err)
 	}
 
 	log.Println("Server stopped.")
 }
 
 func (an *AlsoNow) Stop() {
-	select {
-	case an.stop <- struct{}{}:
-	default:
-	}
+	close(an.stop)
 }
