@@ -15,7 +15,7 @@ go get github.com/alsonow/alsonow
 ```go
 package main
 
-import "github.com/yourusername/alsonow"
+import "github.com/alsonow/alsonow"
 
 func main() {
     an := alsonow.New()
