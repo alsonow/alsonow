@@ -6,104 +6,148 @@ package alsonow
 
 import (
 	"context"
+	"crypto/tls"
 	"fmt"
 	"log"
 	"net"
 	"net/http"
 	"os"
 	"os/signal"
+	"sync"
 	"syscall"
 	"time"
 )
 
 type AlsoNow struct {
 	Router
-	stop         chan struct{}
-	serverConfig *http.Server
+	server   *http.Server
+	stop     chan struct{}
+	stopOnce sync.Once
 }
 
 func New() *AlsoNow {
 	router := newRouter()
-	return &AlsoNow{
+	an := &AlsoNow{
 		Router: router,
 		stop:   make(chan struct{}),
-		serverConfig: &http.Server{
-			ReadHeaderTimeout: 5 * time.Second,
+		server: &http.Server{
+			ReadHeaderTimeout: 10 * time.Second,
+			ReadTimeout:       30 * time.Second,
+			WriteTimeout:      30 * time.Second,
+			IdleTimeout:       90 * time.Second,
 		},
 	}
+
+	an.server.Handler = an
+	an.Use(Recover())
+
+	return an
 }
 
-func NewWithLogger() *AlsoNow {
-	router := newRouter()
-	// logger
-	router.Use(Logger())
-	return &AlsoNow{
-		Router: router,
-		stop:   make(chan struct{}),
-		serverConfig: &http.Server{
-			ReadHeaderTimeout: 5 * time.Second,
-		},
-	}
+func (an *AlsoNow) WithLogger() *AlsoNow {
+	an.Use(Logger())
+	return an
 }
 
-func (an *AlsoNow) WithServerConfig(cfg *http.Server) *AlsoNow {
-	if cfg != nil {
-		an.serverConfig = cfg
+func (an *AlsoNow) WithServer(server *http.Server) *AlsoNow {
+	if server != nil {
+		if server.Handler == nil {
+			server.Handler = an
+		}
+		an.server = server
 	}
 	return an
 }
 
-func (an *AlsoNow) Run() {
-	fmt.Println("🌠 Also now.")
-	host := "0.0.0.0"
-	port := "1221"
-
-	if addr := os.Getenv("ALSONOW_ADDR"); addr != "" {
-		h, p, err := net.SplitHostPort(addr)
-		if err != nil {
-			log.Printf("Invalid ALSONOW_ADDR %q, using default: %v", addr, err)
-		} else {
-			host, port = h, p
-		}
+func formatListenURL(addr string, isTLS bool) string {
+	host, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		return addr
 	}
 
-	addr := fmt.Sprintf("%s:%s", host, port)
-	fmt.Printf("Listening on http://%s:%s\n", host, port)
+	scheme := "http"
+	if isTLS {
+		scheme = "https"
+	}
 
-	server := an.serverConfig
-	server.Handler = an
-	server.Addr = addr
+	if host == "" || host == "0.0.0.0" || host == "::" {
+		host = "localhost"
+	}
 
-	listenErr := make(chan error, 1)
+	if (isTLS && port == "443") || (!isTLS && port == "80") {
+		return fmt.Sprintf("%s://%s", scheme, host)
+	}
+
+	return fmt.Sprintf("%s://%s:%s", scheme, host, port)
+}
+
+func (an *AlsoNow) Run(addr ...string) {
+	runAddr := ":1221"
+
+	if len(addr) > 0 && addr[0] != "" {
+		runAddr = addr[0]
+	} else if env := os.Getenv("ALSONOW_ADDR"); env != "" {
+		runAddr = env
+	}
+
+	an.server.Addr = runAddr
+	log.Printf("🌠 AlsoNow starting on %s", formatListenURL(runAddr, false))
+
 	go func() {
-		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			listenErr <- err
+		if err := an.server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			log.Fatalf("Server error: %v", err)
 		}
 	}()
 
-	quit := make(chan os.Signal, 1)
-	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
+	an.waitStopSignal()
+}
+
+func (an *AlsoNow) RunTLS(addr, certFile, keyFile string) {
+	if addr == "" {
+		addr = ":443"
+	}
+
+	an.server.Addr = addr
+	an.server.TLSConfig = &tls.Config{
+		MinVersion: tls.VersionTLS12,
+	}
+
+	log.Printf("🌠 AlsoNow starting on %s", formatListenURL(addr, true))
+
+	go func() {
+		if err := an.server.ListenAndServeTLS(certFile, keyFile); err != nil && err != http.ErrServerClosed {
+			log.Fatalf("TLS Server error: %v", err)
+		}
+	}()
+
+	an.waitStopSignal()
+}
+
+func (an *AlsoNow) waitStopSignal() {
+	sig := make(chan os.Signal, 1)
+	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
 
 	select {
 	case <-an.stop:
-		log.Println("Received Stop() signal")
-	case <-quit:
-		log.Println("Received system interrupt (SIGINT/SIGTERM)")
-	case err := <-listenErr:
-		log.Fatalf("Server listen error: %v", err)
+		log.Println("Received Stop() call")
+	case s := <-sig:
+		log.Printf("Received signal: %v, shutting down gracefully...", s)
 	}
 
 	log.Println("Shutting down server...")
+
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	if err := server.Shutdown(ctx); err != nil {
-		log.Printf("Server forced shutdown: %v", err)
+	if err := an.server.Shutdown(ctx); err != nil {
+		log.Printf("Forced shutdown: %v", err)
+	} else {
+		log.Println("Server stopped gracefully.")
 	}
-
-	log.Println("Server stopped.")
 }
 
 func (an *AlsoNow) Stop() {
-	close(an.stop)
+	an.stopOnce.Do(func() {
+		close(an.stop)
+	})
 }

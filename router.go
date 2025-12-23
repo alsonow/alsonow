@@ -7,6 +7,7 @@ package alsonow
 import (
 	"net/http"
 	"strings"
+	"sync"
 )
 
 type Router interface {
@@ -25,179 +26,264 @@ type Router interface {
 }
 
 type routerImpl struct {
-	routes      map[string]map[string][]HandlerFunc // method -> path -> handlers
-	middlewares []HandlerFunc
+	staticRoutes      map[string]map[string][]HandlerFunc // method -> path -> handlers
+	paramRoutes       map[string]map[string][]HandlerFunc // method -> pattern -> handlers
+	globalMiddlewares []HandlerFunc
+	pool              sync.Pool
 }
 
 type Group struct {
-	prefix string
-	router *routerImpl
+	prefix      string
+	middlewares []HandlerFunc
+	router      *routerImpl
 }
 
-func newRouter() *routerImpl {
-	return &routerImpl{
-		routes: make(map[string]map[string][]HandlerFunc),
+func newRouter() Router {
+	r := &routerImpl{
+		staticRoutes: make(map[string]map[string][]HandlerFunc),
+		paramRoutes:  make(map[string]map[string][]HandlerFunc),
 	}
+	r.pool.New = func() any {
+		return &Context{
+			params: make(map[string]string),
+			keys:   make(map[string]any),
+		}
+	}
+	return r
 }
 
-func (r *routerImpl) addRoute(method, path string, handlers []HandlerFunc) {
-	fullHandlers := append([]HandlerFunc{}, r.middlewares...)
-	fullHandlers = append(fullHandlers, handlers...)
-
-	if _, ok := r.routes[method]; !ok {
-		r.routes[method] = make(map[string][]HandlerFunc)
+func normalizePath(path string) string {
+	if path == "" {
+		return "/"
 	}
-	r.routes[method][path] = fullHandlers
+	path = strings.TrimSpace(path)
+	if !strings.HasPrefix(path, "/") {
+		path = "/" + path
+	}
+	path = strings.TrimSuffix(path, "/")
+	if path == "" {
+		return "/"
+	}
+	return path
+}
+
+func (r *routerImpl) addRoute(method, rawPath string, routeMiddlewares, handlers []HandlerFunc) {
+	path := normalizePath(rawPath)
+
+	finalHandlers := make([]HandlerFunc, 0, len(r.globalMiddlewares)+len(routeMiddlewares)+len(handlers))
+	finalHandlers = append(finalHandlers, r.globalMiddlewares...)
+	finalHandlers = append(finalHandlers, routeMiddlewares...)
+	finalHandlers = append(finalHandlers, handlers...)
+
+	if strings.ContainsAny(path[1:], ":") {
+		if r.paramRoutes[method] == nil {
+			r.paramRoutes[method] = make(map[string][]HandlerFunc)
+		}
+		r.paramRoutes[method][path] = finalHandlers
+	} else {
+		if r.staticRoutes[method] == nil {
+			r.staticRoutes[method] = make(map[string][]HandlerFunc)
+		}
+		r.staticRoutes[method][path] = finalHandlers
+	}
 }
 
 func (r *routerImpl) GET(path string, handlers ...HandlerFunc) {
-	r.addRoute(http.MethodGet, path, handlers)
+	r.addRoute(http.MethodGet, path, nil, handlers)
 }
 
 func (r *routerImpl) POST(path string, handlers ...HandlerFunc) {
-	r.addRoute(http.MethodPost, path, handlers)
+	r.addRoute(http.MethodPost, path, nil, handlers)
 }
 
 func (r *routerImpl) PUT(path string, handlers ...HandlerFunc) {
-	r.addRoute(http.MethodPut, path, handlers)
+	r.addRoute(http.MethodPut, path, nil, handlers)
 }
 
 func (r *routerImpl) DELETE(path string, handlers ...HandlerFunc) {
-	r.addRoute(http.MethodDelete, path, handlers)
+	r.addRoute(http.MethodDelete, path, nil, handlers)
 }
 
 func (r *routerImpl) PATCH(path string, handlers ...HandlerFunc) {
-	r.addRoute(http.MethodPatch, path, handlers)
+	r.addRoute(http.MethodPatch, path, nil, handlers)
 }
 
 func (r *routerImpl) OPTIONS(path string, handlers ...HandlerFunc) {
-	r.addRoute(http.MethodOptions, path, handlers)
+	r.addRoute(http.MethodOptions, path, nil, handlers)
 }
 
 func (r *routerImpl) HEAD(path string, handlers ...HandlerFunc) {
-	r.addRoute(http.MethodHead, path, handlers)
+	r.addRoute(http.MethodHead, path, nil, handlers)
 }
 
 func (r *routerImpl) CONNECT(path string, handlers ...HandlerFunc) {
-	r.addRoute(http.MethodConnect, path, handlers)
+	r.addRoute(http.MethodConnect, path, nil, handlers)
 }
 
 func (r *routerImpl) TRACE(path string, handlers ...HandlerFunc) {
-	r.addRoute(http.MethodTrace, path, handlers)
+	r.addRoute(http.MethodTrace, path, nil, handlers)
 }
 
-func (r *routerImpl) Use(middleware ...HandlerFunc) {
-	r.middlewares = append(r.middlewares, middleware...)
+func (r *routerImpl) Use(middlewares ...HandlerFunc) {
+	r.globalMiddlewares = append(r.globalMiddlewares, middlewares...)
 }
 
-func (r *routerImpl) Group(prefix string, handlers ...HandlerFunc) *Group {
-	g := &Group{
-		prefix: strings.TrimSuffix(prefix, "/"),
-		router: r,
+func (r *routerImpl) Group(prefix string, middlewares ...HandlerFunc) *Group {
+	return &Group{
+		prefix:      normalizePath(prefix),
+		middlewares: append([]HandlerFunc{}, append(r.globalMiddlewares, middlewares...)...),
+		router:      r,
 	}
-	g.router.middlewares = append(r.middlewares, handlers...)
-	return g
 }
 
-func (g *Group) GET(path string, handlers ...HandlerFunc) {
-	g.router.addRoute(http.MethodGet, g.prefix+path, handlers)
+func (g *Group) add(method, path string, handlers ...HandlerFunc) {
+	fullPath := g.prefix
+	if len(path) > 0 {
+		if path[0] != '/' && !strings.HasSuffix(fullPath, "/") {
+			fullPath += "/"
+		}
+		fullPath += strings.TrimPrefix(path, "/")
+	}
+	g.router.addRoute(method, fullPath, g.middlewares, handlers)
 }
 
-func (g *Group) POST(path string, handlers ...HandlerFunc) {
-	g.router.addRoute(http.MethodPost, g.prefix+path, handlers)
-}
+func (g *Group) GET(path string, handlers ...HandlerFunc) { g.add(http.MethodGet, path, handlers...) }
 
-func (g *Group) PUT(path string, handlers ...HandlerFunc) {
-	g.router.addRoute(http.MethodPut, g.prefix+path, handlers)
-}
+func (g *Group) POST(path string, handlers ...HandlerFunc) { g.add(http.MethodPost, path, handlers...) }
+
+func (g *Group) PUT(path string, handlers ...HandlerFunc) { g.add(http.MethodPut, path, handlers...) }
 
 func (g *Group) DELETE(path string, handlers ...HandlerFunc) {
-	g.router.addRoute(http.MethodDelete, g.prefix+path, handlers)
+	g.add(http.MethodDelete, path, handlers...)
 }
 
 func (g *Group) PATCH(path string, handlers ...HandlerFunc) {
-	g.router.addRoute(http.MethodPatch, g.prefix+path, handlers)
+	g.add(http.MethodPatch, path, handlers...)
 }
 
 func (g *Group) OPTIONS(path string, handlers ...HandlerFunc) {
-	g.router.addRoute(http.MethodOptions, g.prefix+path, handlers)
+	g.add(http.MethodOptions, path, handlers...)
 }
 
-func (g *Group) HEAD(path string, handlers ...HandlerFunc) {
-	g.router.addRoute(http.MethodHead, g.prefix+path, handlers)
-}
+func (g *Group) HEAD(path string, handlers ...HandlerFunc) { g.add(http.MethodHead, path, handlers...) }
 
 func (g *Group) CONNECT(path string, handlers ...HandlerFunc) {
-	g.router.addRoute(http.MethodConnect, g.prefix+path, handlers)
+	g.add(http.MethodConnect, path, handlers...)
 }
 
 func (g *Group) TRACE(path string, handlers ...HandlerFunc) {
-	g.router.addRoute(http.MethodTrace, g.prefix+path, handlers)
+	g.add(http.MethodTrace, path, handlers...)
 }
 
-func (g *Group) Group(prefix string, handlers ...HandlerFunc) *Group {
+func (g *Group) Group(subPrefix string, middlewares ...HandlerFunc) *Group {
+	newPrefix := g.prefix
+	if !strings.HasSuffix(newPrefix, "/") {
+		newPrefix += "/"
+	}
+	newPrefix += strings.TrimPrefix(normalizePath(subPrefix), "/")
+
+	combined := make([]HandlerFunc, 0, len(g.middlewares)+len(middlewares))
+	combined = append(combined, g.middlewares...)
+	combined = append(combined, middlewares...)
+
 	return &Group{
-		prefix: g.prefix + strings.TrimSuffix(prefix, "/"),
-		router: g.router,
+		prefix:      newPrefix,
+		middlewares: combined,
+		router:      g.router,
 	}
 }
 
-func (r *routerImpl) ServeHTTP(w http.ResponseWriter, req *http.Request) {
-	path := req.URL.Path
-	method := req.Method
+func (r *routerImpl) acquireContext(w http.ResponseWriter, req *http.Request, handlers []HandlerFunc) *Context {
+	ctx := r.pool.Get().(*Context)
+	ctx.Writer = w
+	ctx.Req = req
+	ctx.handlers = handlers
+	ctx.index = -1
+	ctx.aborted = false
 
-	if handlers, ok := r.routes[method][path]; ok {
-		ctx := r.newContext(w, req, handlers)
-		ctx.Next()
-		return
+	for k := range ctx.params {
+		delete(ctx.params, k)
+	}
+	for k := range ctx.keys {
+		delete(ctx.keys, k)
 	}
 
-	// :id
-	for p, handlers := range r.routes[method] {
-		if matchParams, ok := matchPath(p, path); ok {
-			ctx := r.newContext(w, req, handlers)
-			ctx.Params = matchParams
-			ctx.Next()
-			return
-		}
-	}
+	return ctx
+}
 
-	http.NotFound(w, req)
+func (r *routerImpl) releaseContext(ctx *Context) {
+	ctx.handlers = nil
+	ctx.Writer = nil
+	ctx.Req = nil
+	r.pool.Put(ctx)
 }
 
 func matchPath(pattern, path string) (map[string]string, bool) {
-	patternParts := strings.Split(strings.Trim(pattern, "/"), "/")
-	pathParts := strings.Split(strings.Trim(path, "/"), "/")
+	pattern = normalizePath(pattern)
+	path = normalizePath(path)
 
-	if len(patternParts) != len(pathParts) {
+	if pattern == path {
+		return nil, true
+	}
+
+	pp := strings.Split(pattern[1:], "/")
+	ap := strings.Split(path[1:], "/")
+
+	if len(pp) != len(ap) {
 		return nil, false
 	}
 
 	params := make(map[string]string)
-	for i, part := range patternParts {
-		if strings.HasPrefix(part, ":") || (strings.HasPrefix(part, "{") && strings.HasSuffix(part, "}")) {
-			name := strings.TrimPrefix(strings.TrimSuffix(part, "}"), ":")
-			params[name] = pathParts[i]
-		} else if part != pathParts[i] {
+	for i, part := range pp {
+		if strings.HasPrefix(part, ":") {
+			name := part[1:]
+			if name == "" {
+				return nil, false
+			}
+			params[name] = ap[i]
+		} else if part != ap[i] {
 			return nil, false
 		}
 	}
 	return params, true
 }
 
-func (r *routerImpl) newContext(w http.ResponseWriter, req *http.Request, handlers []HandlerFunc) *Context {
-	query := make(map[string]string)
-	for k, v := range req.URL.Query() {
-		if len(v) > 0 {
-			query[k] = v[0]
+func (r *routerImpl) ServeHTTP(w http.ResponseWriter, req *http.Request) {
+	method := req.Method
+	path := normalizePath(req.URL.Path)
+
+	var handlers []HandlerFunc
+	var params map[string]string
+
+	if m, ok := r.staticRoutes[method]; ok {
+		if h, ok := m[path]; ok {
+			handlers = h
 		}
 	}
-	return &Context{
-		Writer:   w,
-		Req:      req,
-		Params:   make(map[string]string),
-		Query:    query,
-		handlers: handlers,
-		index:    -1,
+
+	if handlers == nil {
+		if m, ok := r.paramRoutes[method]; ok {
+			for pattern, h := range m {
+				if p, ok := matchPath(pattern, path); ok {
+					handlers = h
+					params = p
+					break
+				}
+			}
+		}
 	}
+
+	if handlers == nil {
+		http.NotFound(w, req)
+		return
+	}
+
+	ctx := r.acquireContext(w, req, handlers)
+	for k, v := range params {
+		ctx.params[k] = v
+	}
+
+	ctx.Next()
+
+	r.releaseContext(ctx)
 }
