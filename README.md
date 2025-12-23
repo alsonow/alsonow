@@ -20,11 +20,11 @@ import "github.com/yourusername/alsonow"
 func main() {
     an := alsonow.New()
 
-    app.GET("/", func(c *alsonow.Context) {
+    an.GET("/", func(c *alsonow.Context) {
         c.String(200, "Hello from AlsoNow! 🌠")
     })
 
-    app.Run()
+    an.Run()
 }
 ```
 
