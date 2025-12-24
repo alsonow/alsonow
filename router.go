@@ -19,16 +19,24 @@ type Router interface {
 	PATCH(path string, handlers ...HandlerFunc)
 	OPTIONS(path string, handlers ...HandlerFunc)
 	HEAD(path string, handlers ...HandlerFunc)
-	CONNECT(path string, handlers ...HandlerFunc)
-	TRACE(path string, handlers ...HandlerFunc)
-	Group(prefix string, handlers ...HandlerFunc) *Group
-	Use(middleware ...HandlerFunc)
+
+	Group(prefix string, middlewares ...HandlerFunc) *Group
+	Use(middlewares ...HandlerFunc)
+}
+
+// node represents a radix tree node.
+// https://en.wikipedia.org/wiki/Radix_tree
+type node struct {
+	children   map[string]*node
+	paramChild *node
+	handlers   []HandlerFunc
+	isEnd      bool
+	paramName  string
 }
 
 // routerImpl router implementation
 type routerImpl struct {
-	staticRoutes      map[string]map[string][]HandlerFunc // method -> path -> handlers
-	paramRoutes       map[string]map[string][]HandlerFunc // method -> pattern -> handlers
+	trees             map[string]*node // method -> root node
 	globalMiddlewares []HandlerFunc
 	pool              sync.Pool
 }
@@ -41,151 +49,211 @@ type Group struct {
 
 func newRouter() Router {
 	r := &routerImpl{
-		staticRoutes: make(map[string]map[string][]HandlerFunc),
-		paramRoutes:  make(map[string]map[string][]HandlerFunc),
+		trees: make(map[string]*node),
 	}
 	r.pool.New = func() any {
 		return &Context{
-			params: make(map[string]string),
-			data:   make(map[string]any),
+			params: make(map[string]string, 4),
+			data:   make(map[string]any, 10),
 		}
 	}
 	return r
 }
 
 func normalizePath(path string) string {
-	path = strings.TrimSpace(path)
 	if path == "" {
 		return "/"
+	}
+	path = strings.TrimSpace(path)
+	if path != "/" {
+		path = strings.TrimSuffix(path, "/")
 	}
 	if !strings.HasPrefix(path, "/") {
 		path = "/" + path
 	}
-	path = strings.TrimSuffix(path, "/")
-	if path == "" {
-		return "/"
+	for strings.Contains(path, "//") {
+		path = strings.ReplaceAll(path, "//", "/")
 	}
 	return path
 }
 
-func (r *routerImpl) addRoute(method, rawPath string, routeMiddlewares, handlers []HandlerFunc) {
-	path := normalizePath(rawPath)
-
-	finalHandlers := make([]HandlerFunc, 0, len(r.globalMiddlewares)+len(routeMiddlewares)+len(handlers))
-	finalHandlers = append(finalHandlers, r.globalMiddlewares...)
-	finalHandlers = append(finalHandlers, routeMiddlewares...)
-	finalHandlers = append(finalHandlers, handlers...)
-
-	if strings.ContainsAny(path[1:], ":") {
-		if r.paramRoutes[method] == nil {
-			r.paramRoutes[method] = make(map[string][]HandlerFunc)
+func (r *routerImpl) getTree(method string) *node {
+	if r.trees[method] == nil {
+		r.trees[method] = &node{
+			children: make(map[string]*node),
 		}
-		r.paramRoutes[method][path] = finalHandlers
-	} else {
-		if r.staticRoutes[method] == nil {
-			r.staticRoutes[method] = make(map[string][]HandlerFunc)
+	}
+	return r.trees[method]
+}
+
+func (r *routerImpl) insert(method, path string, handlers []HandlerFunc) {
+	path = normalizePath(path)
+	root := r.getTree(method)
+
+	if path == "/" {
+		root.isEnd = true
+		root.handlers = handlers
+		return
+	}
+
+	segments := strings.Split(path[1:], "/")
+	cur := root
+
+	for i, segment := range segments {
+		if segment == "" {
+			continue
 		}
-		r.staticRoutes[method][path] = finalHandlers
+
+		isParam := segment[0] == ':'
+		var child *node
+
+		if isParam {
+			if cur.paramChild == nil {
+				cur.paramChild = &node{
+					children:  make(map[string]*node),
+					paramName: segment[1:],
+				}
+			}
+			child = cur.paramChild
+		} else {
+			if cur.children == nil {
+				cur.children = make(map[string]*node)
+			}
+			if _, ok := cur.children[segment]; !ok {
+				cur.children[segment] = &node{
+					children: make(map[string]*node),
+				}
+			}
+			child = cur.children[segment]
+		}
+
+		cur = child
+
+		if i == len(segments)-1 {
+			cur.isEnd = true
+			cur.handlers = handlers
+		}
 	}
 }
 
-func (r *routerImpl) GET(path string, handlers ...HandlerFunc) {
-	r.addRoute(http.MethodGet, path, nil, handlers)
+func (r *routerImpl) search(method, path string) ([]HandlerFunc, map[string]string) {
+	path = normalizePath(path)
+	root := r.trees[method]
+	if root == nil {
+		return nil, nil
+	}
+
+	if path == "/" {
+		if root.isEnd {
+			return root.handlers, nil
+		}
+		return nil, nil
+	}
+
+	segments := strings.Split(path[1:], "/")
+	params := make(map[string]string)
+	cur := root
+
+	for i, segment := range segments {
+		if segment == "" {
+			continue
+		}
+
+		found := false
+
+		if cur.children != nil {
+			if child, ok := cur.children[segment]; ok {
+				cur = child
+				found = true
+			}
+		}
+
+		if !found && cur.paramChild != nil {
+			cur = cur.paramChild
+			if cur.paramName != "" {
+				params[cur.paramName] = segment
+			}
+			found = true
+		}
+
+		if !found {
+			return nil, nil
+		}
+
+		if i == len(segments)-1 && cur.isEnd {
+			return cur.handlers, params
+		}
+	}
+
+	return nil, nil
 }
 
-func (r *routerImpl) POST(path string, handlers ...HandlerFunc) {
-	r.addRoute(http.MethodPost, path, nil, handlers)
+func (r *routerImpl) addRoute(method, path string, groupMiddlewares, handlers []HandlerFunc) {
+	final := make([]HandlerFunc, 0, len(r.globalMiddlewares)+len(groupMiddlewares)+len(handlers))
+	final = append(final, r.globalMiddlewares...)
+	final = append(final, groupMiddlewares...)
+	final = append(final, handlers...)
+
+	r.insert(method, path, final)
 }
 
-func (r *routerImpl) PUT(path string, handlers ...HandlerFunc) {
-	r.addRoute(http.MethodPut, path, nil, handlers)
+func (r *routerImpl) GET(path string, h ...HandlerFunc)  { r.addRoute(http.MethodGet, path, nil, h) }
+func (r *routerImpl) POST(path string, h ...HandlerFunc) { r.addRoute(http.MethodPost, path, nil, h) }
+func (r *routerImpl) PUT(path string, h ...HandlerFunc)  { r.addRoute(http.MethodPut, path, nil, h) }
+func (r *routerImpl) DELETE(path string, h ...HandlerFunc) {
+	r.addRoute(http.MethodDelete, path, nil, h)
+}
+func (r *routerImpl) PATCH(path string, h ...HandlerFunc) { r.addRoute(http.MethodPatch, path, nil, h) }
+func (r *routerImpl) OPTIONS(path string, h ...HandlerFunc) {
+	r.addRoute(http.MethodOptions, path, nil, h)
+}
+func (r *routerImpl) HEAD(path string, h ...HandlerFunc) { r.addRoute(http.MethodHead, path, nil, h) }
+
+func (r *routerImpl) Use(m ...HandlerFunc) {
+	r.globalMiddlewares = append(r.globalMiddlewares, m...)
 }
 
-func (r *routerImpl) DELETE(path string, handlers ...HandlerFunc) {
-	r.addRoute(http.MethodDelete, path, nil, handlers)
-}
+func (r *routerImpl) Group(prefix string, m ...HandlerFunc) *Group {
+	combined := make([]HandlerFunc, 0, len(r.globalMiddlewares)+len(m))
+	combined = append(combined, r.globalMiddlewares...)
+	combined = append(combined, m...)
 
-func (r *routerImpl) PATCH(path string, handlers ...HandlerFunc) {
-	r.addRoute(http.MethodPatch, path, nil, handlers)
-}
-
-func (r *routerImpl) OPTIONS(path string, handlers ...HandlerFunc) {
-	r.addRoute(http.MethodOptions, path, nil, handlers)
-}
-
-func (r *routerImpl) HEAD(path string, handlers ...HandlerFunc) {
-	r.addRoute(http.MethodHead, path, nil, handlers)
-}
-
-func (r *routerImpl) CONNECT(path string, handlers ...HandlerFunc) {
-	r.addRoute(http.MethodConnect, path, nil, handlers)
-}
-
-func (r *routerImpl) TRACE(path string, handlers ...HandlerFunc) {
-	r.addRoute(http.MethodTrace, path, nil, handlers)
-}
-
-func (r *routerImpl) Use(middlewares ...HandlerFunc) {
-	r.globalMiddlewares = append(r.globalMiddlewares, middlewares...)
-}
-
-func (r *routerImpl) Group(prefix string, middlewares ...HandlerFunc) *Group {
 	return &Group{
 		prefix:      normalizePath(prefix),
-		middlewares: append([]HandlerFunc{}, append(r.globalMiddlewares, middlewares...)...),
+		middlewares: combined,
 		router:      r,
 	}
 }
 
-func (g *Group) add(method, path string, handlers ...HandlerFunc) {
+func (g *Group) add(method, path string, h ...HandlerFunc) {
 	fullPath := g.prefix
-	if len(path) > 0 {
-		if path[0] != '/' && !strings.HasSuffix(fullPath, "/") {
+	if path = normalizePath(path); path != "/" {
+		if !strings.HasSuffix(fullPath, "/") {
 			fullPath += "/"
 		}
 		fullPath += strings.TrimPrefix(path, "/")
 	}
-	g.router.addRoute(method, fullPath, g.middlewares, handlers)
+	g.router.addRoute(method, fullPath, g.middlewares, h)
 }
 
-func (g *Group) GET(path string, handlers ...HandlerFunc) { g.add(http.MethodGet, path, handlers...) }
+func (g *Group) GET(path string, h ...HandlerFunc)     { g.add(http.MethodGet, path, h...) }
+func (g *Group) POST(path string, h ...HandlerFunc)    { g.add(http.MethodPost, path, h...) }
+func (g *Group) PUT(path string, h ...HandlerFunc)     { g.add(http.MethodPut, path, h...) }
+func (g *Group) DELETE(path string, h ...HandlerFunc)  { g.add(http.MethodDelete, path, h...) }
+func (g *Group) PATCH(path string, h ...HandlerFunc)   { g.add(http.MethodPatch, path, h...) }
+func (g *Group) OPTIONS(path string, h ...HandlerFunc) { g.add(http.MethodOptions, path, h...) }
+func (g *Group) HEAD(path string, h ...HandlerFunc)    { g.add(http.MethodHead, path, h...) }
 
-func (g *Group) POST(path string, handlers ...HandlerFunc) { g.add(http.MethodPost, path, handlers...) }
-
-func (g *Group) PUT(path string, handlers ...HandlerFunc) { g.add(http.MethodPut, path, handlers...) }
-
-func (g *Group) DELETE(path string, handlers ...HandlerFunc) {
-	g.add(http.MethodDelete, path, handlers...)
-}
-
-func (g *Group) PATCH(path string, handlers ...HandlerFunc) {
-	g.add(http.MethodPatch, path, handlers...)
-}
-
-func (g *Group) OPTIONS(path string, handlers ...HandlerFunc) {
-	g.add(http.MethodOptions, path, handlers...)
-}
-
-func (g *Group) HEAD(path string, handlers ...HandlerFunc) { g.add(http.MethodHead, path, handlers...) }
-
-func (g *Group) CONNECT(path string, handlers ...HandlerFunc) {
-	g.add(http.MethodConnect, path, handlers...)
-}
-
-func (g *Group) TRACE(path string, handlers ...HandlerFunc) {
-	g.add(http.MethodTrace, path, handlers...)
-}
-
-func (g *Group) Group(subPrefix string, middlewares ...HandlerFunc) *Group {
+func (g *Group) Group(sub string, m ...HandlerFunc) *Group {
 	newPrefix := g.prefix
 	if !strings.HasSuffix(newPrefix, "/") {
 		newPrefix += "/"
 	}
-	newPrefix += strings.TrimPrefix(normalizePath(subPrefix), "/")
+	newPrefix += strings.TrimPrefix(normalizePath(sub), "/")
 
-	combined := make([]HandlerFunc, 0, len(g.middlewares)+len(middlewares))
+	combined := make([]HandlerFunc, 0, len(g.middlewares)+len(m))
 	combined = append(combined, g.middlewares...)
-	combined = append(combined, middlewares...)
+	combined = append(combined, m...)
 
 	return &Group{
 		prefix:      newPrefix,
@@ -194,93 +262,42 @@ func (g *Group) Group(subPrefix string, middlewares ...HandlerFunc) *Group {
 	}
 }
 
-func (r *routerImpl) acquireContext(w http.ResponseWriter, req *http.Request, handlers []HandlerFunc) *Context {
+func (r *routerImpl) acquireCtx(w http.ResponseWriter, req *http.Request, h []HandlerFunc) *Context {
 	ctx := r.pool.Get().(*Context)
 	ctx.Writer = w
 	ctx.Req = req
-	ctx.handlers = handlers
+	ctx.handlers = h
 	ctx.index = -1
 	ctx.aborted = false
 
-	clear(ctx.params)
-	clear(ctx.data)
-
+	for k := range ctx.params {
+		delete(ctx.params, k)
+	}
+	for k := range ctx.data {
+		delete(ctx.data, k)
+	}
 	return ctx
 }
 
-func (r *routerImpl) releaseContext(ctx *Context) {
+func (r *routerImpl) releaseCtx(ctx *Context) {
 	ctx.handlers = nil
 	ctx.Writer = nil
 	ctx.Req = nil
 	r.pool.Put(ctx)
 }
 
-func matchPath(pattern, path string) (map[string]string, bool) {
-	pattern = normalizePath(pattern)
-	path = normalizePath(path)
-
-	if pattern == path {
-		return nil, true
-	}
-
-	pp := strings.Split(pattern[1:], "/")
-	ap := strings.Split(path[1:], "/")
-
-	if len(pp) != len(ap) {
-		return nil, false
-	}
-
-	params := make(map[string]string)
-	for i, part := range pp {
-		if strings.HasPrefix(part, ":") {
-			name := part[1:]
-			if name == "" {
-				return nil, false
-			}
-			params[name] = ap[i]
-		} else if part != ap[i] {
-			return nil, false
-		}
-	}
-	return params, true
-}
-
 func (r *routerImpl) ServeHTTP(w http.ResponseWriter, req *http.Request) {
-	method := req.Method
-	path := normalizePath(req.URL.Path)
-
-	var handlers []HandlerFunc
-	var params map[string]string
-
-	if m, ok := r.staticRoutes[method]; ok {
-		if h, ok := m[path]; ok {
-			handlers = h
-		}
-	}
-
-	if handlers == nil {
-		if m, ok := r.paramRoutes[method]; ok {
-			for pattern, h := range m {
-				if p, ok := matchPath(pattern, path); ok {
-					handlers = h
-					params = p
-					break
-				}
-			}
-		}
-	}
-
+	handlers, params := r.search(req.Method, req.URL.Path)
 	if handlers == nil {
 		http.NotFound(w, req)
 		return
 	}
 
-	ctx := r.acquireContext(w, req, handlers)
+	ctx := r.acquireCtx(w, req, handlers)
 	for k, v := range params {
 		ctx.params[k] = v
 	}
 
 	ctx.Next()
-
-	r.releaseContext(ctx)
+	r.releaseCtx(ctx)
 }
