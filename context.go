@@ -8,6 +8,7 @@ import (
 	"context"
 	"net/http"
 	"net/url"
+	"sync"
 )
 
 // HandlerFunc defines the handler used by router.
@@ -15,13 +16,20 @@ type HandlerFunc func(*Context)
 
 // Context holds request-scope data and provides helper methods.
 type Context struct {
-	Writer   http.ResponseWriter
-	Req      *http.Request
-	params   map[string]string
-	data     map[string]any // Stores custom data for the request.
-	index    int
+	Writer http.ResponseWriter
+	Req    *http.Request
+
+	params map[string]string
+
+	// Stores custom data for the request.
+	data map[string]any
+
+	index    int8
 	handlers []HandlerFunc
 	aborted  bool
+
+	// This mutex protects data map
+	mu sync.RWMutex
 }
 
 // Context returns the request's context
@@ -124,6 +132,9 @@ func (c *Context) QueryAll() url.Values {
 
 // Set stores a value in the request context.
 func (c *Context) Set(key string, value any) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
 	if c.data == nil {
 		c.data = make(map[string]any)
 	}
@@ -132,8 +143,33 @@ func (c *Context) Set(key string, value any) {
 
 // Get retrieves a value from the request context.
 func (c *Context) Get(key string) (any, bool) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	if c.data == nil {
+		return nil, false
+	}
 	v, ok := c.data[key]
 	return v, ok
+}
+
+// GetString is a convenience wrapper to retrieve and assert a string value.
+func (c *Context) GetString(key string) (string, bool) {
+	if v, ok := c.Get(key); ok {
+		s, ok := v.(string)
+		return s, ok
+	}
+	return "", false
+}
+
+// Delete removes a value from the context by its key.
+func (c *Context) Delete(key string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if c.data != nil {
+		delete(c.data, key)
+	}
 }
 
 // Next invokes the next handler in the chain.
@@ -143,31 +179,20 @@ func (c *Context) Next() {
 		return
 	}
 
-	select {
-	case <-c.Req.Context().Done():
-		return
-	default:
-	}
-
 	c.index++
 
-	for c.index < len(c.handlers) {
+	for c.index < int8(len(c.handlers)) {
 		if c.aborted {
+			return
+		}
+
+		if c.Req.Context().Err() != nil {
 			return
 		}
 
 		c.handlers[c.index](c)
 		c.index++
 	}
-
-	// Concise, elegant...
-	// If you want to a take another look during the next code review~ (￣▽￣*)ゞ
-	// for ; c.index < len(c.handlers); c.index++ {
-	// 	if c.aborted {
-	// 		return
-	// 	}
-	// 	c.handlers[c.index](c)
-	// }
 }
 
 // Abort stops execution of remaining handlers.
