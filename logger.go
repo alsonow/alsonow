@@ -6,8 +6,6 @@ package alsonow
 
 import (
 	"log"
-	"net/http"
-	"strings"
 	"time"
 )
 
@@ -18,8 +16,6 @@ func Logger() HandlerFunc {
 		c.Next()
 
 		duration := time.Since(start)
-		method := c.Req.Method
-		path := c.Req.URL.Path
 
 		clientIP := ClientIP(c.Req)
 		userAgent := c.Req.UserAgent()
@@ -28,22 +24,9 @@ func Logger() HandlerFunc {
 			time.Now().Format("2006/01/02 15:04:05"),
 			duration,
 			clientIP,
-			method,
-			path,
+			c.Method(),
+			c.Path(),
 			userAgent,
 		)
 	}
-}
-
-func ClientIP(r *http.Request) string {
-	if ip := r.Header.Get("X-Forwarded-For"); ip != "" {
-		if idx := strings.Index(ip, ","); idx > 0 {
-			return strings.TrimSpace(ip[:idx])
-		}
-		return strings.TrimSpace(ip)
-	}
-	if ip := r.Header.Get("X-Real-IP"); ip != "" {
-		return strings.TrimSpace(ip)
-	}
-	return r.RemoteAddr[:strings.LastIndex(r.RemoteAddr, ":")]
 }

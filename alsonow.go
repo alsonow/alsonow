@@ -25,6 +25,7 @@ type AlsoNow struct {
 	stopOnce sync.Once
 }
 
+// New returns a new AlsoNow instance.
 func New() *AlsoNow {
 	router := newRouter()
 	an := &AlsoNow{
@@ -134,7 +135,7 @@ func (an *AlsoNow) waitStopSignal() {
 		log.Printf("Received signal: %v, shutting down gracefully...", s)
 	}
 
-	log.Println("Shutting down server...")
+	log.Println("Shutting down server, will timeout after 30 seconds...")
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()

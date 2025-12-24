@@ -25,6 +25,7 @@ type Router interface {
 	Use(middleware ...HandlerFunc)
 }
 
+// routerImpl router implementation
 type routerImpl struct {
 	staticRoutes      map[string]map[string][]HandlerFunc // method -> path -> handlers
 	paramRoutes       map[string]map[string][]HandlerFunc // method -> pattern -> handlers
@@ -46,17 +47,17 @@ func newRouter() Router {
 	r.pool.New = func() any {
 		return &Context{
 			params: make(map[string]string),
-			keys:   make(map[string]any),
+			data:   make(map[string]any),
 		}
 	}
 	return r
 }
 
 func normalizePath(path string) string {
+	path = strings.TrimSpace(path)
 	if path == "" {
 		return "/"
 	}
-	path = strings.TrimSpace(path)
 	if !strings.HasPrefix(path, "/") {
 		path = "/" + path
 	}
@@ -201,12 +202,8 @@ func (r *routerImpl) acquireContext(w http.ResponseWriter, req *http.Request, ha
 	ctx.index = -1
 	ctx.aborted = false
 
-	for k := range ctx.params {
-		delete(ctx.params, k)
-	}
-	for k := range ctx.keys {
-		delete(ctx.keys, k)
-	}
+	clear(ctx.params)
+	clear(ctx.data)
 
 	return ctx
 }
