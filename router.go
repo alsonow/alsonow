@@ -64,16 +64,22 @@ func normalizePath(path string) string {
 	if path == "" {
 		return "/"
 	}
+
 	path = strings.TrimSpace(path)
-	if path != "/" {
-		path = strings.TrimSuffix(path, "/")
-	}
-	if !strings.HasPrefix(path, "/") {
-		path = "/" + path
-	}
+
+	// Run the loop first.
 	for strings.Contains(path, "//") {
 		path = strings.ReplaceAll(path, "//", "/")
 	}
+
+	if !strings.HasPrefix(path, "/") {
+		path = "/" + path
+	}
+
+	if path != "/" {
+		path = strings.TrimSuffix(path, "/")
+	}
+
 	return path
 }
 
@@ -86,13 +92,13 @@ func (r *routerImpl) getTree(method string) *node {
 	return r.trees[method]
 }
 
-func (r *routerImpl) insert(method, path string, handlers []HandlerFunc) {
+func (r *routerImpl) insert(method, path string, combinedHandlers []HandlerFunc) {
 	path = normalizePath(path)
 	root := r.getTree(method)
 
 	if path == "/" {
 		root.isEnd = true
-		root.handlers = handlers
+		root.handlers = combinedHandlers
 		return
 	}
 
@@ -100,25 +106,19 @@ func (r *routerImpl) insert(method, path string, handlers []HandlerFunc) {
 	cur := root
 
 	for i, segment := range segments {
-		if segment == "" {
-			continue
-		}
-
 		isParam := segment[0] == ':'
 		var child *node
 
 		if isParam {
+			paramName := segment[1:]
 			if cur.paramChild == nil {
 				cur.paramChild = &node{
 					children:  make(map[string]*node),
-					paramName: segment[1:],
+					paramName: paramName,
 				}
 			}
 			child = cur.paramChild
 		} else {
-			if cur.children == nil {
-				cur.children = make(map[string]*node)
-			}
 			if _, ok := cur.children[segment]; !ok {
 				cur.children[segment] = &node{
 					children: make(map[string]*node),
@@ -131,7 +131,7 @@ func (r *routerImpl) insert(method, path string, handlers []HandlerFunc) {
 
 		if i == len(segments)-1 {
 			cur.isEnd = true
-			cur.handlers = handlers
+			cur.handlers = combinedHandlers
 		}
 	}
 }
@@ -155,10 +155,6 @@ func (r *routerImpl) search(method, path string) ([]HandlerFunc, map[string]stri
 	cur := root
 
 	for i, segment := range segments {
-		if segment == "" {
-			continue
-		}
-
 		found := false
 
 		if cur.children != nil {
@@ -188,13 +184,13 @@ func (r *routerImpl) search(method, path string) ([]HandlerFunc, map[string]stri
 	return nil, nil
 }
 
-func (r *routerImpl) addRoute(method, path string, groupMiddlewares, handlers []HandlerFunc) {
-	final := make([]HandlerFunc, 0, len(r.globalMiddlewares)+len(groupMiddlewares)+len(handlers))
-	final = append(final, r.globalMiddlewares...)
-	final = append(final, groupMiddlewares...)
-	final = append(final, handlers...)
+func (r *routerImpl) addRoute(method, path string, groupMiddlewares, routeHandlers []HandlerFunc) {
+	combinedHandlers := make([]HandlerFunc, 0, len(r.globalMiddlewares)+len(groupMiddlewares)+len(routeHandlers))
+	combinedHandlers = append(combinedHandlers, r.globalMiddlewares...)
+	combinedHandlers = append(combinedHandlers, groupMiddlewares...)
+	combinedHandlers = append(combinedHandlers, routeHandlers...)
 
-	r.insert(method, path, final)
+	r.insert(method, path, combinedHandlers)
 }
 
 func (r *routerImpl) GET(path string, h ...HandlerFunc)  { r.addRoute(http.MethodGet, path, nil, h) }
