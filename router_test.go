@@ -46,6 +46,17 @@ func TestRouter_normalizePath(t *testing.T) {
 			if got != tt.expected {
 				t.Errorf("normalizePath(%q) = %q, want %q", tt.input, got, tt.expected)
 			}
+
+			// add
+			fullPath := "api"
+			if got != "/" {
+				if !strings.HasSuffix(fullPath, "/") {
+					fullPath += "/"
+				}
+				fullPath += strings.TrimPrefix(got, "/")
+			}
+
+			fmt.Println(fullPath)
 		})
 	}
 }

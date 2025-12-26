@@ -37,14 +37,16 @@ type node struct {
 
 // routerImpl router implementation
 type routerImpl struct {
-	trees             map[string]*node // method -> root node
-	globalMiddlewares []HandlerFunc
-	pool              sync.Pool
+	// trees method -> root node
+	trees       map[string]*node
+	middlewares []HandlerFunc
+	pool        sync.Pool
 }
 
 type Group struct {
 	prefix      string
 	middlewares []HandlerFunc
+	parent      *Group
 	router      *routerImpl
 }
 
@@ -103,6 +105,7 @@ func (r *routerImpl) insert(method, path string, combined []HandlerFunc) {
 		return
 	}
 
+	fmt.Println(path)
 	segments := strings.Split(path[1:], "/")
 	cur := root
 
@@ -188,11 +191,10 @@ func (r *routerImpl) search(method, path string) ([]HandlerFunc, map[string]stri
 	return nil, nil
 }
 
-func (r *routerImpl) addRoute(method, path string, groupMiddlewares, routeHandlers []HandlerFunc) {
-	combined := make([]HandlerFunc, 0, len(r.globalMiddlewares)+len(groupMiddlewares)+len(routeHandlers))
-	combined = append(combined, r.globalMiddlewares...)
-	combined = append(combined, groupMiddlewares...)
-	combined = append(combined, routeHandlers...)
+func (r *routerImpl) addRoute(method, path string, middlewares, handlers []HandlerFunc) {
+	combined := make([]HandlerFunc, 0, len(middlewares)+len(handlers))
+	combined = append(combined, middlewares...)
+	combined = append(combined, handlers...)
 
 	r.insert(method, path, combined)
 }
@@ -210,19 +212,27 @@ func (r *routerImpl) OPTIONS(path string, h ...HandlerFunc) {
 func (r *routerImpl) HEAD(path string, h ...HandlerFunc) { r.addRoute(http.MethodHead, path, nil, h) }
 
 func (r *routerImpl) Use(m ...HandlerFunc) {
-	r.globalMiddlewares = append(r.globalMiddlewares, m...)
+	r.middlewares = append(r.middlewares, m...)
 }
 
 func (r *routerImpl) Group(prefix string, m ...HandlerFunc) *Group {
-	combined := make([]HandlerFunc, 0, len(r.globalMiddlewares)+len(m))
-	combined = append(combined, r.globalMiddlewares...)
-	combined = append(combined, m...)
-
 	return &Group{
 		prefix:      normalizePath(prefix),
-		middlewares: combined,
+		middlewares: m,
 		router:      r,
 	}
+}
+
+func (g *Group) collectMiddlewares() []HandlerFunc {
+	var mids []HandlerFunc
+	current := g
+	for current != nil {
+		mids = append(mids, current.middlewares...)
+		current = current.parent
+	}
+
+	mids = append(mids, g.router.middlewares...)
+	return mids
 }
 
 func (g *Group) add(method, path string, h ...HandlerFunc) {
@@ -233,7 +243,9 @@ func (g *Group) add(method, path string, h ...HandlerFunc) {
 		}
 		fullPath += strings.TrimPrefix(path, "/")
 	}
-	g.router.addRoute(method, fullPath, g.middlewares, h)
+
+	middlewares := g.collectMiddlewares()
+	g.router.addRoute(method, fullPath, middlewares, h)
 }
 
 func (g *Group) GET(path string, h ...HandlerFunc)     { g.add(http.MethodGet, path, h...) }
@@ -251,13 +263,10 @@ func (g *Group) Group(sub string, m ...HandlerFunc) *Group {
 	}
 	newPrefix += strings.TrimPrefix(normalizePath(sub), "/")
 
-	combined := make([]HandlerFunc, 0, len(g.middlewares)+len(m))
-	combined = append(combined, g.middlewares...)
-	combined = append(combined, m...)
-
 	return &Group{
 		prefix:      newPrefix,
-		middlewares: combined,
+		middlewares: m,
+		parent:      g,
 		router:      g.router,
 	}
 }
