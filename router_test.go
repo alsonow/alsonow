@@ -49,3 +49,36 @@ func TestRouter_normalizePath(t *testing.T) {
 		})
 	}
 }
+
+func TestRouter_ClearAndLoopDelete(t *testing.T) {
+	t.Run("clear and loop delete", func(t *testing.T) {
+		m := map[string]int{
+			"a": 1,
+			"b": 2,
+			"c": 3,
+		}
+
+		clear(m)
+		if len(m) != 0 {
+			t.Errorf("expected map to be empty after clear, but got %d elements", len(m))
+		}
+
+		m = map[string]int{
+			"a": 1,
+			"b": 2,
+			"c": 3,
+		}
+
+		for k := range m {
+			delete(m, k)
+		}
+		if len(m) != 0 {
+			t.Errorf("expected map to be empty after loop delete, but got %d elements", len(m))
+		}
+	})
+
+	t.Run("nil map", func(t *testing.T) {
+		var m map[string]string
+		clear(m)
+	})
+}

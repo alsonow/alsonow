@@ -5,6 +5,7 @@
 package alsonow
 
 import (
+	"fmt"
 	"net/http"
 	"strings"
 	"sync"
@@ -92,33 +93,43 @@ func (r *routerImpl) getTree(method string) *node {
 	return r.trees[method]
 }
 
-func (r *routerImpl) insert(method, path string, combinedHandlers []HandlerFunc) {
+func (r *routerImpl) insert(method, path string, combined []HandlerFunc) {
 	path = normalizePath(path)
 	root := r.getTree(method)
 
 	if path == "/" {
 		root.isEnd = true
-		root.handlers = combinedHandlers
+		root.handlers = combined
 		return
 	}
 
 	segments := strings.Split(path[1:], "/")
 	cur := root
 
-	for i, segment := range segments {
+	for _, segment := range segments {
 		isParam := segment[0] == ':'
 		var child *node
 
 		if isParam {
 			paramName := segment[1:]
-			if cur.paramChild == nil {
+			if cur.paramChild != nil {
+				if cur.paramChild.paramName != paramName {
+					panic(fmt.Sprintf(
+						"cannot register '%s': parameter name ':%s' conflicts with existing ':%s' in previously registered path",
+						path, paramName, cur.paramChild.paramName,
+					))
+				}
+			} else {
 				cur.paramChild = &node{
-					children:  make(map[string]*node),
 					paramName: paramName,
 				}
 			}
 			child = cur.paramChild
 		} else {
+			if cur.children == nil {
+				cur.children = make(map[string]*node)
+			}
+
 			if _, ok := cur.children[segment]; !ok {
 				cur.children[segment] = &node{
 					children: make(map[string]*node),
@@ -128,12 +139,11 @@ func (r *routerImpl) insert(method, path string, combinedHandlers []HandlerFunc)
 		}
 
 		cur = child
-
-		if i == len(segments)-1 {
-			cur.isEnd = true
-			cur.handlers = combinedHandlers
-		}
 	}
+
+	// At this point, len(segments) must be greater than 0
+	cur.isEnd = true
+	cur.handlers = combined
 }
 
 func (r *routerImpl) search(method, path string) ([]HandlerFunc, map[string]string) {
@@ -154,43 +164,37 @@ func (r *routerImpl) search(method, path string) ([]HandlerFunc, map[string]stri
 	params := make(map[string]string)
 	cur := root
 
-	for i, segment := range segments {
-		found := false
-
+	for _, segment := range segments {
 		if cur.children != nil {
 			if child, ok := cur.children[segment]; ok {
 				cur = child
-				found = true
+				continue
 			}
 		}
 
-		if !found && cur.paramChild != nil {
+		if cur.paramChild != nil {
 			cur = cur.paramChild
-			if cur.paramName != "" {
-				params[cur.paramName] = segment
-			}
-			found = true
+			params[cur.paramName] = segment
+			continue
 		}
 
-		if !found {
-			return nil, nil
-		}
+		return nil, nil
+	}
 
-		if i == len(segments)-1 && cur.isEnd {
-			return cur.handlers, params
-		}
+	if cur.isEnd {
+		return cur.handlers, params
 	}
 
 	return nil, nil
 }
 
 func (r *routerImpl) addRoute(method, path string, groupMiddlewares, routeHandlers []HandlerFunc) {
-	combinedHandlers := make([]HandlerFunc, 0, len(r.globalMiddlewares)+len(groupMiddlewares)+len(routeHandlers))
-	combinedHandlers = append(combinedHandlers, r.globalMiddlewares...)
-	combinedHandlers = append(combinedHandlers, groupMiddlewares...)
-	combinedHandlers = append(combinedHandlers, routeHandlers...)
+	combined := make([]HandlerFunc, 0, len(r.globalMiddlewares)+len(groupMiddlewares)+len(routeHandlers))
+	combined = append(combined, r.globalMiddlewares...)
+	combined = append(combined, groupMiddlewares...)
+	combined = append(combined, routeHandlers...)
 
-	r.insert(method, path, combinedHandlers)
+	r.insert(method, path, combined)
 }
 
 func (r *routerImpl) GET(path string, h ...HandlerFunc)  { r.addRoute(http.MethodGet, path, nil, h) }
@@ -266,12 +270,10 @@ func (r *routerImpl) acquireCtx(w http.ResponseWriter, req *http.Request, h []Ha
 	ctx.index = -1
 	ctx.aborted = false
 
-	for k := range ctx.params {
-		delete(ctx.params, k)
-	}
-	for k := range ctx.data {
-		delete(ctx.data, k)
-	}
+	// go1.21+
+	clear(ctx.params)
+	clear(ctx.data)
+
 	return ctx
 }
 
