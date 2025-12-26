@@ -192,6 +192,11 @@ func (r *routerImpl) search(method, path string) ([]HandlerFunc, map[string]stri
 }
 
 func (r *routerImpl) addRoute(method, path string, middlewares, handlers []HandlerFunc) {
+	// If middlewares is nil, use an empty slice instead.
+	if middlewares == nil {
+		middlewares = []HandlerFunc{}
+	}
+
 	combined := make([]HandlerFunc, 0, len(middlewares)+len(handlers))
 	combined = append(combined, middlewares...)
 	combined = append(combined, handlers...)
